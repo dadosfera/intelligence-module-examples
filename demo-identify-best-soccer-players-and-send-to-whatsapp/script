@@ -1,0 +1,66 @@
+from heyoo import WhatsApp
+import os
+from snowflake.snowpark import Session
+from dadosfera import connection_parameters
+from snowflake.snowpark import functions as F
+
+snowpark = Session.builder.configs(connection_parameters).create()
+
+def pre_process_data():
+    table = snowpark.table('tb__4q858i__demo_crawler_transfermarkt_site_under20_soccer_scouting')
+    transformed_table = (
+        table.flatten('data')
+            .selectExpr(
+                'value:assists::integer as assists', 
+                'value:club::varchar as club',
+                'value:competition::varchar as competition',
+                'value:goals::integer as goals',
+                'value:minutesPlayed::varchar as minutes_played',
+                'value:season:varchar as season',
+                'id',
+                'url',
+                '_processing_timestamp'
+            )
+            .withColumn('minutes_played', F.replace('minutes_played', '\'', ''))
+    )
+    
+    
+    return transformed_table
+
+def get_suitable_players(transformed_table):
+    data = (
+        transformed_table 
+        .groupBy('id','url').agg(F.sum('minutes_played').alias('sum_minutes_played'))
+        .filter(F.col('sum_minutes_played') >= 1000)
+        .orderBy(F.col('sum_minutes_played').desc())
+        .limit(20)
+        .collect()
+    )
+    
+    payload = []
+    for row in data:
+        payload.append({
+            'id': row.ID,
+            'url': row.URL,
+            'sum_minutes_played': row.SUM_MINUTES_PLAYED
+        })
+        
+    return payload
+
+def create_message(player_metadata):
+    return (
+        f"The player {player_metadata['id']} have already played {int(player_metadata['sum_minutes_played'])} minutes. "
+        f"You can view more information about this player in the following url: {player_metadata['url']}."
+    )
+
+def main():
+    transformed_table = pre_process_data()
+    player_metadata_list = get_suitable_players(transformed_table)
+    
+    messenger = WhatsApp(os.environ['WHATSAPP_API_KEY'],
+                     phone_number_id='phone_number_id')
+    
+    for player_metadata in player_metadata_list:
+        message = create_message(player_metadata)
+        response = messenger.send_message(message, 'phone_number')
+        print(response)
